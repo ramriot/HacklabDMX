@@ -1,5 +1,12 @@
+
+
 #include <Wire.h>
-#include <LiquidCrystal_I2C.h>          // Specifically for the SPI LCD module I am using.
+//#include <LiquidCrystal_I2C.h>          // Specifically for the SPI LCD module I am using.
+#include <hd44780.h>                       // main hd44780 header
+#include <hd44780ioClass/hd44780_I2Cexp.h> // i2c expander i/o class header
+
+hd44780_I2Cexp lcd; // declare lcd object: auto locate & auto config expander chip
+
 #include <DmxSimple.h>									// DMX Control library
 #include <avr/pgmspace.h>								// Used to store strings in PROGMEM
 
@@ -23,19 +30,20 @@
 
 // Pattern names          1234567890123456   <- 16-character LCD
 // Use PROGMEM to save RAM
-char text00[] PROGMEM = {"1. Party in haus"};
-char text01[] PROGMEM = {"2. White Mirror"}; 
-char text02[] PROGMEM = {"3. Mirror Colors"};
-char text03[] PROGMEM = {"4. Slow Feeling"};
-char text04[] PROGMEM = {"5. Purple World"};
-char text05[] PROGMEM = {"6. Moose Factory"};
-char text06[] PROGMEM = {"7. Smothermoth"};
-char text07[] PROGMEM = {"8. Full Retard!"};
-char text08[] PROGMEM = {"9. Splines"};
+char const text00[] PROGMEM = {"1. Party in haus"};
+char const text01[] PROGMEM = {"2. White Mirror"}; 
+char const text02[] PROGMEM = {"3. Mirror Colors"};
+char const text03[] PROGMEM = {"4. Slow Feeling"};
+char const text04[] PROGMEM = {"5. Purple World"};
+char const text05[] PROGMEM = {"6. Moose Factory"};
+char const text06[] PROGMEM = {"7. Smothermoth"};
+char const text07[] PROGMEM = {"8. Full Retard!"};
+char const text08[] PROGMEM = {"9. Splines"};
 
-char text09[] PROGMEM = {"10. AUTO CYCLE"};
-PROGMEM const char *string_table[] = {
-    text00, text01, text02, text03, text04, text05, text06, text07, text08, text09};
+const char text09[] PROGMEM = {"10. AUTO CYCLE"};
+// uint8_t* const array[] PROGMEM={&var, &var1};
+const char* const string_table[] PROGMEM = {text00, text01, text02, text03, text04, text05, text06, text07, text08, text09};
+//const char * string_table[] = {text00, text01, text02, text03, text04, text05, text06, text07, text08, text09};
 
 char buffer[30];			// A string buffer used for the progmems
 byte lastButtonUp;		// The last time the Up button was pressed
@@ -54,16 +62,45 @@ long lastAutoChange = 0;	// Last time we changed to the next sequence in 'Auto S
 byte CurrentAutoSequence = 0;		// The current sequence we are in, in auto-sequence mode.
 
 // Define our LCD display
-LiquidCrystal_I2C lcd(GPIO_ADDR,16,2);  // set address & 16 chars / 2 lines
+//LiquidCrystal_I2C lcd(GPIO_ADDR,16,2);  // set address & 16 chars / 2 lines
 
 long nextBeat = 0; 				// When the next beat should run, based on Millis();
 byte SeqStep = 0;					// The current step in the current sequence.
 
-void setup(){
+// LCD geometry
+const int LCD_COLS = 16;
+const int LCD_ROWS = 2;
 
-  lcd.init();                           // initialize the lcd 
-  lcd.backlight();                      // Print a message to the LCD.
+void setup(){
+int status;
+
+  // initialize LCD with number of columns and rows: 
+  // hd44780 returns a status from begin() that can be used
+  // to determine if initalization failed.
+  // the actual status codes are defined in <hd44780.h>
+  // See the values RV_XXXX
+  //
+  // looking at the return status from begin() is optional
+  // it is being done here to provide feedback should there be an issue
+  //
+  // note:
+  //  begin() will automatically turn on the backlight
+  //
+  status = lcd.begin(LCD_COLS, LCD_ROWS);
+  if(status) // non zero status means it was unsuccesful
+  {
+    status = -status; // convert negative status value to positive number
+
+    // begin() failed so blink error code using the onboard LED if possible
+    hd44780::fatalError(status); // does not return
+  }
+
+  // initalization was successful, the backlight should be on now
+
+  //lcd.begin();                          // initialize the lcd 
+  //lcd.backlight();                      // Print a message to the LCD.
   lcd.print("Startup...");
+  delay(4000);
 
   DmxSimple.maxChannel(200);						// We're not going to address channels above 200, so this speeds up the DMX transmission a bit.
   

@@ -1,93 +1,117 @@
 
 
-//#define DEBUG
-// #include <TinyWireM.h>                  // I2C Master lib for ATTinys which use USI - comment this out to use with standard arduinos
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>          // for LCD w/ GPIO MODIFIED for the ATtiny85
-#include <DmxSimple.h>
-#include <avr/pgmspace.h>
-#include <SoftwareSerial.h>
 
+#include <Wire.h>
+//#include <LiquidCrystal_I2C.h>          // Specifically for the SPI LCD module I am using.
+#include <hd44780.h>                       // main hd44780 header
+#include <hd44780ioClass/hd44780_I2Cexp.h> // i2c expander i/o class header
+
+hd44780_I2Cexp lcd; // declare lcd object: auto locate & auto config expander chip
+
+#include <DmxSimple.h>									// DMX Control library
+#include <avr/pgmspace.h>								// Used to store strings in PROGMEM
 
 #define GPIO_ADDR     0x27             // (PCA8574A A0-A2 @5V) typ. A0-A3 Gnd 0x20 / 0x38 for A - 0x27 is the address of the Digispark LCD modules.
 
-// All of the lights
-#define VIZI1  60
+// All of the lights, starting DMX channel
+#define VIZI1  60			// The two big American DJ Vizi Spot Pros
 #define VIZI2  74
-#define ELIM1  44
+#define ELIM1  44			// Eliminator LED modules from Chauvet
 #define ELIM2  52
-#define MIN1   88
+#define MIN1   88			// Chauvet Min Spot RGB fixtures
 #define MIN2   101
-#define SC25   35  // FUTURE IMPLEMENTATION
+#define SC25   35  // FUTURE IMPLEMENTATION - these lights are present but not used in the code.
 #define AVG    40
-#define PAR4   1
+#define PAR4   1		// The Par4 can unit, also not currently implemented.
 
-
+// Pins the buttons are attached to -- the DOWN button currently does not exist.
 #define BUTTON_UP 10
 #define BUTTON_DOWN 9
 #define BUTTON_OK 8
 
-// Pattern names          1234567890123456
+// Pattern names          1234567890123456   <- 16-character LCD
 // Use PROGMEM to save RAM
-const char text00[] PROGMEM = {"1. Party in haus"};
-const char text01[] PROGMEM = {"2. White Mirror"}; 
-const char text02[] PROGMEM = {"3. Mirror Colors"};
-const char text03[] PROGMEM = {"4. Slow Feeling"};
-const char text04[] PROGMEM = {"5. Purple World"};
-const char text05[] PROGMEM = {"6. Moose Factory"};
-const char text06[] PROGMEM = {"7. Smothermoth"};
-const char text07[] PROGMEM = {"8. Full Retard!"};
-const char text08[] PROGMEM = {"9. Splines"};
+char const text00[] PROGMEM = {"1. Party in haus"};
+char const text01[] PROGMEM = {"2. White Mirror"}; 
+char const text02[] PROGMEM = {"3. Mirror Colors"};
+char const text03[] PROGMEM = {"4. Slow Feeling"};
+char const text04[] PROGMEM = {"5. Purple World"};
+char const text05[] PROGMEM = {"6. Moose Factory"};
+char const text06[] PROGMEM = {"7. Smothermoth"};
+char const text07[] PROGMEM = {"8. Full Retard!"};
+char const text08[] PROGMEM = {"9. Splines"};
 
 const char text09[] PROGMEM = {"10. AUTO CYCLE"};
-PGM_P const string_table[] PROGMEM = {
-    text00, text01, text02, text03, text04, text05, text06, text07, text08, text09};
+// uint8_t* const array[] PROGMEM={&var, &var1};
+const char* const string_table[] PROGMEM = {text00, text01, text02, text03, text04, text05, text06, text07, text08, text09};
+//const char * string_table[] = {text00, text01, text02, text03, text04, text05, text06, text07, text08, text09};
 
-char buffer[30];
-byte lastButtonUp;
-byte lastButtonOk;
-byte lastSeqNum; // The last sequence number that was run.
+char buffer[30];			// A string buffer used for the progmems
+byte lastButtonUp;		// The last time the Up button was pressed
+byte lastButtonOk; 		// The last time the OK button was pressed
+byte lastSeqNum; 			// The last sequence number that was run.
 
-byte LAMP_POWER = 0; // 1 if the lamps are on
-
-byte MenuMode = 0; // Which menu are we in
-byte MenuItem = 0; // Current item in the menu
+byte MenuMode = 0; 				// Which menu are we in, 0 being the 'idle' menu.
+byte MenuItem = 0; 				// Current item in the menu
 byte CurrentSequence = 9; // The current sequence that is playing
-byte pp = 0; // For incremental pattern effects
-long lastButton = 0;
-byte currBeat = 0; // Used for beat display on screen
-byte lastBeat = 0; // Last beat shown on screen
-byte colorOverride = 0; // 0 means NO OVERRIDE
-long lastAutoChange = 0;
-byte CurrentAutoSequence = 0;
+byte pp = 0; 							// For incremental pattern effects
+long lastButton = 0;			// The last time ANY button was pressed.
+byte currBeat = 0; 				// Used for beat display on screen
+byte lastBeat = 0; 				// Last beat shown on screen so we know when to render the next beat.
+byte colorOverride = 0; 	// 0 means NO OVERRIDE, the other numbers are defined below.
+long lastAutoChange = 0;	// Last time we changed to the next sequence in 'Auto Sequence' mode.
+byte CurrentAutoSequence = 0;		// The current sequence we are in, in auto-sequence mode.
 
-LiquidCrystal_I2C lcd(GPIO_ADDR,16,2);  // set address & 16 chars / 2 lines
+// Define our LCD display
+//LiquidCrystal_I2C lcd(GPIO_ADDR,16,2);  // set address & 16 chars / 2 lines
 
-long nextBeat = 0; // When the next beat should run, based on Millis();
-byte SeqStep = 0;
+long nextBeat = 0; 				// When the next beat should run, based on Millis();
+byte SeqStep = 0;					// The current step in the current sequence.
 
-byte BACKLIGHT_ON = 1;
-
-SoftwareSerial mySerial(6, 7); // RX, TX
-
+// LCD geometry
+const int LCD_COLS = 16;
+const int LCD_ROWS = 2;
 
 void setup(){
-  lcd.begin();                           // initialize the lcd 
-  lcd.backlight();                      // Print a message to the LCD.
-  lcd.print("Startup...");
+int status;
 
-  DmxSimple.maxChannel(200);
+  // initialize LCD with number of columns and rows: 
+  // hd44780 returns a status from begin() that can be used
+  // to determine if initalization failed.
+  // the actual status codes are defined in <hd44780.h>
+  // See the values RV_XXXX
+  //
+  // looking at the return status from begin() is optional
+  // it is being done here to provide feedback should there be an issue
+  //
+  // note:
+  //  begin() will automatically turn on the backlight
+  //
+  status = lcd.begin(LCD_COLS, LCD_ROWS);
+  if(status) // non zero status means it was unsuccesful
+  {
+    status = -status; // convert negative status value to positive number
+
+    // begin() failed so blink error code using the onboard LED if possible
+    hd44780::fatalError(status); // does not return
+  }
+
+  // initalization was successful, the backlight should be on now
+
+  //lcd.begin();                          // initialize the lcd 
+  //lcd.backlight();                      // Print a message to the LCD.
+  lcd.print("Startup...");
+  delay(4000);
+
+  DmxSimple.maxChannel(200);						// We're not going to address channels above 200, so this speeds up the DMX transmission a bit.
   
-  
-  Serial.begin(9600);
-  mySerial.begin(9600);
-  
-  // Set up the buttons
+  // Set up the button inputs
   pinMode(BUTTON_UP, INPUT);
   pinMode(BUTTON_OK, INPUT);
   digitalWrite(BUTTON_UP, HIGH); // enable pullup resistor
   digitalWrite(BUTTON_OK, HIGH); // enable pullup resistor
   
+  // Default channel settings on each of our lamps.
   ViziSetup(VIZI1);
   ViziSetup(VIZI2);
   IntimSetup(ELIM1);
@@ -95,30 +119,25 @@ void setup(){
   MinSetup(MIN1);
   MinSetup(MIN2);
   
-  
-  
+  // Put the default message on the screen
   updateScreen();
 }
 
 
-void loop(){
+void loop() { // This code runs continuously.
 
   // See if a button is being pressed.
   checkButtons();
   
-  if (millis() > nextBeat) runNextBeat();
   
-  // Time to switch back to the main screen?
+  if (millis() > nextBeat) runNextBeat(); 		// Is it time to advance to the next step in our sequence?
+  
+  // If no button is pressed in 30 seconds, the Idle screen returns.
+  // Time to switch back to the main screen?  
   if ((millis() > lastButton + 30000 || millis() < lastButton) && MenuMode > 0)
   {
     MenuMode = 0;
     updateScreen(); 
-  }
-  
-  if ((millis() > lastButton + 30000 || millis() < lastButton) && BACKLIGHT_ON == 1)
-  {
-   BACKLIGHT_ON = 0;
-   lcd.noBacklight(); 
   }
   
   if (MenuMode == 0 && lastBeat != SeqStep) // Display current beat on the LCD screen
@@ -130,26 +149,28 @@ void loop(){
   
 }
 
-void runNextBeat()
+void runNextBeat() // This is the lion's share of the actual movement code of the lamps.
 {
-  float stepLen = 2; // By default, a step is two beats.  
+  float stepLen = 2; // By default, a step is two beats.  But some sequences can redefine this on a per-sequence or even per-step basis.
   
-  byte useSeq = CurrentSequence;
+  byte useSeq = CurrentSequence; // Which sequence are we displaying?
   
-  if (useSeq == 9) // AUTO CYCLE
+  if (useSeq == 9) // Sequence 9 is the AUTO CYCLE sequence.
   { 
     useSeq = CurrentAutoSequence;
     // Automatically go to the next sequence after 30 seconds.
     if (millis() - lastAutoChange > 30000)
     {
-       CurrentAutoSequence++;
-       if (CurrentAutoSequence > 8) CurrentAutoSequence = 0;
+       CurrentAutoSequence++; 
+       if (CurrentAutoSequence > 8) CurrentAutoSequence = 0; // There are currently 9 normal sequences.
        lastAutoChange = millis();
        updateScreen();
     }
   }
   
   
+  // If the sequence has changed, run the reset routine.  This is to clean up any messy settings left by a sequence, such as strobing, prisms, patterns, etc.  
+  // The setup routine should reset each lamp back to a default state.
   if (useSeq != lastSeqNum)
   {
     lastSeqNum = CurrentSequence;
@@ -157,9 +178,14 @@ void runNextBeat()
   }
   
   
-  switch (useSeq)
+  switch (useSeq) // OK, our big case statement to see what we should be doing for each sequence.
   {
     case 0: // Medium speed fun pattern
+
+			/*
+				NOTE: Please see below for what each of these functions does, I'm not going to document them in each sequence.
+				But basically they set positions, colors, etc of each lamp.
+			*/
 
       // Step number
       switch (SeqStep)
@@ -236,17 +262,18 @@ void runNextBeat()
           MinPattern(MIN2, '7');
       IntimColor(ELIM2, 'w');
       ViziPos(VIZI1, 5, 225); // Mirror Ball
-      ViziPos(VIZI2, 5, 30);
+      ViziPos(VIZI2, 7, 25);
       IntimPos(ELIM1, 127, 127);
       IntimPos(ELIM2, 127, 127);
       break;
 
-    case 2: // Point to Mirror Ball.
+    case 2: // Point to Mirror Ball with colors.
+    
       ViziPattern(VIZI1, '1', 230);
       ViziPattern(VIZI2, '1', 230);
 
       ViziPos(VIZI1, 5, 225);
-      ViziPos(VIZI2, 5, 30);
+      ViziPos(VIZI2, 7, 25);
       IntimPos(ELIM1, 127, 127);
       IntimPos(ELIM2, 127, 127);
             
@@ -605,11 +632,12 @@ void runNextBeat()
 
   }
   
-  nextBeat = millis() + (stepLen * 500); // TODO: Implement BPM here  
+  nextBeat = millis() + (stepLen * 500); // TODO: Implement BPM here, so the speed of the sequences can be adjusted.
 }
 
 void resetFixtures()
 {
+		// Set each sequence back to a known default state.
     MinSetup(MIN1);
     MinSetup(MIN2);
     ViziSetup(VIZI1);
@@ -618,76 +646,49 @@ void resetFixtures()
     IntimSetup(ELIM2);
 }
 
-char clrWOverride(char c)
+char clrWOverride(char c) // If a color override is set, send only the override color.  Otherwise send the requested color.
 {
-  switch (colorOverride) // If a color override is set, send only the override color.  Otherwise send the requested color.
+  switch (colorOverride) 
   {
     case 0: return c;
-    case 1: return 'r';
-    case 2: return 'g';
-    case 3: return 'b';
-    case 4: return 'y';
-    case 5: return 'w';
+    case 1: return 'r'; // Red
+    case 2: return 'g'; // Green
+    case 3: return 'b'; // Blue
+    case 4: return 'y'; // Yellow
+    case 5: return 'w'; // White
   } 
 }
 
 void checkButtons()
 {
-  // See if buttons are being pressed.
-  
-  byte b1Down = 0;
-  byte b2Down = 0;
-  
+  // See if buttons are currently being pressed.
   byte bRead = digitalRead(BUTTON_UP);
-  if (bRead == LOW) b1Down = 1;
-  if (bRead != lastButtonUp)
+  if (bRead != lastButtonUp) // Has the button state changed?
   {
-    if (millis() - lastButton > 50)
+    if (millis() - lastButton > 50) // Debounce
     {
       lastButtonUp = bRead;
-      // If the button is down, change the sequence.
-      if (bRead == LOW) 
-          butPress(BUTTON_UP);
+      if (bRead == LOW) butPress(BUTTON_UP); // Trigger a button press action.
       lastButton = millis();
     }
   }
   bRead = digitalRead(BUTTON_OK);
-  if (bRead == LOW) b2Down = 1;
   if (bRead != lastButtonOk)   {
     if (millis() - lastButton > 50)     {
       lastButtonOk = bRead;
-      if (bRead == LOW) 
-        butPress(BUTTON_OK);
+      if (bRead == LOW) butPress(BUTTON_OK);
       lastButton = millis();
     }
   }
 
-
-  if (b1Down == 1 && b2Down == 1)
-  {
-    // Both buttons are being held down!  Needs to be more than 3000 ms
-    if (millis() - lastButton > 3000 && MenuMode != 10)
-    {
-       // TOGGLE POWER
-       MenuMode = 10;
-       setLampPower(1 - LAMP_POWER);
-       updateScreen();
-    } 
-  }
-  
 
 }
 
 void butPress(byte theButton)
 {
+  // Complex menu-based code removed, now the left button just sets a color override and the right button sets a pattern.
+  // The menu system can come back when there are more options.
   
-  if (BACKLIGHT_ON == 0)
-  {
-   BACKLIGHT_ON = 1;
-   lcd.backlight(); 
-  }
-  
-  // Later: Multiple menu modes.
   switch (theButton)
   {
     case BUTTON_UP:
@@ -756,13 +757,14 @@ void butPress(byte theButton)
   updateScreen();
 }
 
-void updateScreen()
+void updateScreen() // Draw the current menu/options to the LCD screen
 {
+	
   lcd.clear();
   byte cs = CurrentSequence;
   switch (MenuMode)
   { 
-    case 0:
+    case 0: // Idle menu
       //         1234567890123456
       if (cs == 9) cs = CurrentAutoSequence;
       lcd.print("HACKLITE by AV: ");
@@ -771,7 +773,7 @@ void updateScreen()
       lcd.print(buffer);
       
       break;
-    case 1:
+    case 1: // Main Menu
       //         1234567890123456
       lcd.print("   MAIN  MENU   ");
       lcd.setCursor(0, 1);
@@ -782,19 +784,19 @@ void updateScreen()
         case 2: lcd.print("3. Colors"); break;
       }
       break;
-    case 2:
+    case 2: // Choose Pattern menu
       //         1234567890123456
       lcd.print("CHOOSE PATTERN");
       lcd.setCursor(0, 1);
       strcpy_P(buffer, (char*)pgm_read_word(&(string_table[CurrentSequence]))); // Necessary casts and dereferencing, just copy. 
       lcd.print(buffer);
       break;
-    case 3:
+    case 3: // Adjust speed menu (TODO)
       //         1234567890123456
       lcd.print(" ADJUST SPEED ");
       lcd.setCursor(0, 1);
       break;
-    case 4:
+    case 4: // Colour override menu
       //         1234567890123456
       lcd.print("COLOR OVERRIDE");
       lcd.setCursor(0, 1);
@@ -809,18 +811,6 @@ void updateScreen()
         case 5: lcd.print("6. White"); break;
       }
       break;
-      
-    case 10:
-      //         1234567890123456
-      lcd.print("   SHOW POWER   ");
-      lcd.setCursor(0, 1);
-      //           1234567890123456
-      if (LAMP_POWER == 1)
-        lcd.print("  POWERING ON"); 
-      else
-        lcd.print("  POWERING OFF"); 
-      
-      break;      
       
   } 
   
@@ -839,11 +829,15 @@ void updateScreen()
 
 
 
+/*
 
+This set of functions deals with modifing the DMX channels of individual fixtures.
+These really should be programmed as classes, but I didn't really have the time to do it.
+Basically you just pass the base channel of each fixture and it knows the offset to get to the setting you want.
 
+*/
 
-
-void ViziSetup(int chan)
+void ViziSetup(int chan) // American DJ Vizi Spot Pro
 {
   // Channel map: 
   // 0-X, 1-XFine, 2-Y, 3-YFine
@@ -857,25 +851,25 @@ void ViziSetup(int chan)
   // 11 Dimmer
   // 12 Movement Speed
   // 13 Reset
-  DmxSimple.write(chan + 10, 255);
-  DmxSimple.write(chan + 11, 255);
-  DmxSimple.write(chan + 9, 190);
+  DmxSimple.write(chan + 10, 255); // Set the Strobe to 255 (solid on)
+  DmxSimple.write(chan + 11, 255); // Set the dimmer to 255 (solid on)
+  DmxSimple.write(chan + 9, 190);  // Set the focus to 190 (a distance of about 20 feet)
   
-  ViziPrism(chan, '0', 0);
-  ViziPattern(chan, '0', 0);  
+  ViziPrism(chan, '0', 0); 				 // Turn off the prism
+  ViziPattern(chan, '0', 0);   	   // Turn off the gobo wheel
 }
 
-void ViziDim(int chan, byte brightness)
+void ViziDim(int chan, byte brightness)   // Adjust the brightness of the fixture
 {
-  DmxSimple.write(chan + 11, brightness);
+  DmxSimple.write(chan + 11, brightness); 
 }
 
-void ViziStrobe(int chan, byte strobe)
+void ViziStrobe(int chan, byte strobe)		// Change the strobe amount.
 {
   DmxSimple.write(chan + 10, strobe);
 }
 
-void ViziColor(int chan, char col)
+void ViziColor(int chan, char col)				// Set the color wheel position.
 {
   col = clrWOverride(col);
   switch (col)
@@ -886,21 +880,21 @@ void ViziColor(int chan, char col)
     case 'g':   DmxSimple.write(chan + 4, 45); break;
     case 'y':   DmxSimple.write(chan + 4, 60); break;
     case 'm':   DmxSimple.write(chan + 4, 75); break;
-    case 'o':   DmxSimple.write(chan + 4, 90); break;
-    case 'p':   DmxSimple.write(chan + 4, 105); break;
-    case 'k':   DmxSimple.write(chan + 4, 120); break;
-    case '0':   DmxSimple.write(chan + 4, 189); break;
+    case 'o':   DmxSimple.write(chan + 4, 90); break;			// Orange
+    case 'p':   DmxSimple.write(chan + 4, 105); break;		// Purple (UV)
+    case 'k':   DmxSimple.write(chan + 4, 120); break;		// Pink
+    case '0':   DmxSimple.write(chan + 4, 189); break; 		// Color wheel spin, Slow...
     case '1':   DmxSimple.write(chan + 4, 170); break;
     case '2':   DmxSimple.write(chan + 4, 150); break;
     case '3':   DmxSimple.write(chan + 4, 128); break;
     case '4':   DmxSimple.write(chan + 4, 194); break;
     case '5':   DmxSimple.write(chan + 4, 210); break;
     case '6':   DmxSimple.write(chan + 4, 235); break;
-    case '7':   DmxSimple.write(chan + 4, 255); break;
+    case '7':   DmxSimple.write(chan + 4, 255); break;		// .. to SUPER FAST
   }    
 }
 
-void ViziPos(int chan, byte p, byte t)
+void ViziPos(int chan, byte p, byte t) // Set Pan and Tilt position
 {
   // X is 42 to 127
   // Y is 0 to 255
@@ -909,16 +903,16 @@ void ViziPos(int chan, byte p, byte t)
   DmxSimple.write(chan + 2, t);  
 }
 
-void ViziPrism(int chan, char p, byte s)
+void ViziPrism(int chan, char p, byte s) 	// Set the optical prism  and prism rotation
 {
-  if (p == '0') DmxSimple.write(chan + 7, 0);
-  if (p == '3') DmxSimple.write(chan + 7, 32);
-  if (p == 'i') DmxSimple.write(chan + 7, 64);
-  if (p == 'f') DmxSimple.write(chan + 7, 96);
-  DmxSimple.write(chan + 8, s);
+  if (p == '0') DmxSimple.write(chan + 7, 0);		// No prism
+  if (p == '3') DmxSimple.write(chan + 7, 32);	// 3-facet prism
+  if (p == 'i') DmxSimple.write(chan + 7, 64);  // Infinite prism
+  if (p == 'f') DmxSimple.write(chan + 7, 96);  // Frost effect
+  DmxSimple.write(chan + 8, s);									// Prism rotation, 0-127 indexed angle, and 128-255 is various rotation speeds and directions, see the fixture manual.
 }
 
-void ViziPattern(int chan, char p, byte s)
+void ViziPattern(int chan, char p, byte s)			// Set the gobo.
 {
   if (p == '0') DmxSimple.write(chan + 5, 0);
   if (p == '1') DmxSimple.write(chan + 5, 10);
@@ -932,7 +926,7 @@ void ViziPattern(int chan, char p, byte s)
 }
 
 
-void IntimSetup(int chan)
+void IntimSetup(int chan)		// Chavet Intimidator LED
 {
   // 0 Pan
   // 1 Tilt
@@ -961,10 +955,10 @@ void IntimColor(int chan, char col)
     case 'b':   DmxSimple.write(chan + 2, 48); break;
     case 'o':   DmxSimple.write(chan + 2, 56); break;
 
-    case '0':   DmxSimple.write(chan + 2, 128); break; // Spin
+    case '0':   DmxSimple.write(chan + 2, 128); break; // Spin Slow
     case '1':   DmxSimple.write(chan + 2, 150); break;
     case '2':   DmxSimple.write(chan + 2, 170); break;
-    case '3':   DmxSimple.write(chan + 2, 191); break;
+    case '3':   DmxSimple.write(chan + 2, 191); break;	// Spin fast
   }    
 }
 
@@ -993,7 +987,7 @@ void IntimPattern(int chan, char p)
 }
 
 
-void MinSetup(int chan)
+void MinSetup(int chan) // Chauvet Min RGB
 {
   // 0 Pan
   // 1 Pan Fine
@@ -1041,7 +1035,7 @@ void MinDim(int chan, byte d)
   DmxSimple.write(chan + 5, (127 - (d / 2)) + 8);
 }
 
-void MinPattern(int chan, char p)
+void MinPattern(int chan, char p)		// Gobo
 {
   if (p == '0') DmxSimple.write(chan + 12, 0);
   if (p == '1') DmxSimple.write(chan + 12, 13);
@@ -1058,17 +1052,4 @@ void MinPattern(int chan, char p)
   if (p == 'b') DmxSimple.write(chan + 12, 230);
   if (p == 'c') DmxSimple.write(chan + 12, 240);
   if (p == 'd') DmxSimple.write(chan + 12, 250); // Fast
-}
-
-
-void setLampPower(byte setPower)
-{
-  LAMP_POWER = setPower;
-  // HLCMD("192.168.2.44", "/test/light.asp")
-  // HLCMD("192.168.2.44", "/test/light.asp?p=off")
-  mySerial.print("HLCMD(\"192.168.2.44\", \"/test/light.asp?p=");
-  if (LAMP_POWER==1) mySerial.println("on\")");
-  if (LAMP_POWER==0) mySerial.println("off\")");
-  
-
 }
